@@ -4,19 +4,17 @@
 #include <sstream>
 #include <vector>
 #include <mutex>
+#include <numeric>
 
 class MainNode : public rclcpp::Node
 {
 public:
-  MainNode(int n)
+  MainNode(int n, int runtime, int frequency)
   : Node("main_node"),
-    sequences_(n, 0),
-    min_delay_(n, INT64_MAX),
-    max_delay_(n, 0),
-    send_count_(n, 0),
-    receive_count_(n, 0)
+    sequences_(n, 0),            // 初始化每个主题的序列号为 0
+    message_counts_(n, 0),        // 初始化每个主题的消息计数为 0
+    received_delays_(n)           // 初始化每个主题的延迟记录
   {
-    // 创建 n 个发布者和订阅者
     for (int i = 1; i <= n; ++i) {
       auto publisher = this->create_publisher<std_msgs::msg::String>(
         "hello_" + std::to_string(i) + "_main", 10);
@@ -29,9 +27,8 @@ public:
         });
       subscribers_.push_back(subscriber);
 
-      // 为每个主题创建独立的定时器
       auto timer = this->create_wall_timer(
-        std::chrono::milliseconds(500),
+        std::chrono::milliseconds(1000 / frequency),
         [this, i]() {publish_message(i);});
       timers_.push_back(timer);
     }
@@ -39,6 +36,10 @@ public:
     // 创建汇总信息定时器
     summary_timer_ = this->create_wall_timer(
       std::chrono::seconds(1), [this]() {print_summary();});
+
+    // 创建运行结束定时器
+    end_timer_ = this->create_wall_timer(
+      std::chrono::seconds(runtime), [this]() {stop_publishing();});
   }
 
   void publish_message(int topic_number)
@@ -55,7 +56,7 @@ public:
     publishers_[topic_number - 1]->publish(message);
 
     // 增加发送计数
-    send_count_[topic_number - 1]++;
+    message_counts_[topic_number - 1]++;
   }
 
   void message_callback(const std_msgs::msg::String::SharedPtr msg, int topic_number)
@@ -70,47 +71,84 @@ public:
       auto received_timestamp = std::stoll(received_data.substr(0, comma_pos));
       auto delay = current_time - received_timestamp;
 
-      // 更新延迟统计
+      // 记录收到的消息及其延迟
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        receive_count_[topic_number - 1]++;
-        if (delay < min_delay_[topic_number - 1]) {min_delay_[topic_number - 1] = delay;}
-        if (delay > max_delay_[topic_number - 1]) {max_delay_[topic_number - 1] = delay;}
+        received_delays_[topic_number - 1].push_back(delay);
       }
     }
   }
 
   void print_summary()
   {
-    // 打印第一个队列的汇总信息
+    // 打印第一个 topic 的序列号和收到的消息总数
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (publishers_.size() > 0) {
+      if (!message_counts_.empty()) {
         RCLCPP_INFO(
           this->get_logger(),
-          "Summary for topic1: Send Count: %d, Receive Count: %d, Min Delay: %ld µs, Max Delay: %ld µs",
-          send_count_[0], receive_count_[0], min_delay_[0], max_delay_[0]);
-
-        // 重置第一个队列的统计信息
-        min_delay_[0] = INT64_MAX;
-        max_delay_[0] = 0;
+          "Summary for topic1: Current Sequence: %ld, Total Received: %d",
+          sequences_[0], message_counts_[0]);
       }
+    }
+  }
+
+  void stop_publishing()
+  {
+    for (auto & timer : timers_) {
+      timer->cancel();        // 停止发布定时器
+    }
+    summary_timer_->cancel();   // 停止汇总信息定时器
+
+    // 检查发送和接收消息数量
+    for (size_t i = 0; i < message_counts_.size(); ++i) {
+      if (message_counts_[i] != sequences_[i]) {
+        RCLCPP_WARN(
+          this->get_logger(), "Mismatch in topic %ld: Sent: %ld, Received: %d",
+          i + 1, sequences_[i], message_counts_[i]);
+        // 延迟10秒后开始打印记录的信息
+        this->create_wall_timer(
+          std::chrono::seconds(10), [this, i]() {print_received_delays(i);});
+      }
+    }
+
+     rclcpp::shutdown(); 
+  }
+
+  void print_received_delays(int topic_number)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!received_delays_[topic_number - 1].empty()) {
+      auto min_delay = *std::min_element(
+        received_delays_[topic_number - 1].begin(),
+        received_delays_[topic_number - 1].end());
+      auto max_delay = *std::max_element(
+        received_delays_[topic_number - 1].begin(),
+        received_delays_[topic_number - 1].end());
+      auto average_delay = std::accumulate(
+        received_delays_[topic_number - 1].begin(),
+        received_delays_[topic_number - 1].end(), 0.0) /
+        received_delays_[topic_number - 1].size();
+
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Topic %d Delays - Min: %ld µs, Max: %ld µs, Average: %.2f µs",
+        topic_number, min_delay, max_delay, average_delay);
     }
   }
 
 private:
   std::vector<rclcpp::Publisher<std_msgs::msg::String>::SharedPtr> publishers_;
   std::vector<rclcpp::Subscription<std_msgs::msg::String>::SharedPtr> subscribers_;
-  std::vector<rclcpp::TimerBase::SharedPtr> timers_;   // 存储每个主题的定时器
-  rclcpp::TimerBase::SharedPtr summary_timer_;   // 汇总信息定时器
+  std::vector<rclcpp::TimerBase::SharedPtr> timers_;
+  rclcpp::TimerBase::SharedPtr summary_timer_;
+  rclcpp::TimerBase::SharedPtr end_timer_;
 
-  std::vector<int64_t> sequences_;   // 每个主题的独立序列号
-  std::vector<int64_t> min_delay_;   // 每个主题的最小延迟
-  std::vector<int64_t> max_delay_;   // 每个主题的最大延迟
-  std::vector<int> send_count_;   // 每个主题的发送数量
-  std::vector<int> receive_count_;   // 每个主题的接收数量
+  std::vector<int64_t> sequences_;     // 每个主题的独立序列号
+  std::vector<int> message_counts_;     // 每个主题的消息计数
+  std::vector<std::vector<int64_t>> received_delays_;    // 存储每个主题的延迟记录
 
-  std::mutex mutex_;   // 保护共享数据的互斥锁
+  std::mutex mutex_;                   // 保护共享数据的互斥锁
 };
 
 int main(int argc, char ** argv)
@@ -118,12 +156,23 @@ int main(int argc, char ** argv)
   rclcpp::init(argc, argv);
 
   // 获取输入参数
-  int topicNum = 1;     // 默认值
+  int topicNum = 1;       // 默认值
+  int runtime = 10;       // 默认运行时间（秒）
+  int frequency = 10;     // 默认发布频率（Hz）
+
   if (argc > 1) {
-    topicNum = std::stoi(argv[1]);         // 从命令行参数获取topicNum
+    topicNum = std::stoi(argv[1]);             // 从命令行参数获取 topicNum
   }
 
-  auto node = std::make_shared<MainNode>(topicNum);
+  if (argc > 2) {
+    runtime = std::stoi(argv[2]);              // 从命令行参数获取运行时间
+  }
+
+  if (argc > 3) {
+    frequency = std::stoi(argv[3]);            // 从命令行参数获取发布频率
+  }
+
+  auto node = std::make_shared<MainNode>(topicNum, runtime, frequency);
 
   // 创建多线程执行器
   rclcpp::executors::MultiThreadedExecutor executor;
