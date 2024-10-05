@@ -102,17 +102,15 @@ public:
 
     // 检查发送和接收消息数量
     for (size_t i = 0; i < message_counts_.size(); ++i) {
-      if (message_counts_[i] != sequences_[i]) {
-        RCLCPP_WARN(
-          this->get_logger(), "Mismatch in topic %ld: Sent: %ld, Received: %d",
-          i + 1, sequences_[i], message_counts_[i]);
-        // 延迟10秒后开始打印记录的信息
-        this->create_wall_timer(
-          std::chrono::seconds(10), [this, i]() {print_received_delays(i);});
-      }
+      RCLCPP_WARN(
+        this->get_logger(), "Mismatch in topic %ld: Sent: %ld, Received: %d",
+        i + 1, sequences_[i], message_counts_[i]);
+      // 延迟10秒后开始打印记录的信息
+      this->create_wall_timer(
+        std::chrono::seconds(10), [this, i]() {print_received_delays(i);});
     }
 
-     rclcpp::shutdown(); 
+    rclcpp::shutdown();
   }
 
   void print_received_delays(int topic_number)
