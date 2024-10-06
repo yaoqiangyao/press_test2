@@ -9,13 +9,22 @@
 class MainNode : public rclcpp::Node
 {
 public:
-  MainNode(int n, int runtime, int frequency)
+  MainNode(int topicNum, int runtime, int frequency)
   : Node("main_node"),
-    sequences_(n, 0),            // 初始化每个主题的序列号为 0
-    message_counts_(n, 0),        // 初始化每个主题的消息计数为 0
-    received_delays_(n)           // 初始化每个主题的延迟记录
+    sequences_(topicNum, 0),            // 初始化每个主题的序列号为 0
+    received_delays_(topicNum)           // 初始化每个主题的延迟记录
   {
-    for (int i = 1; i <= n; ++i) {
+
+    // 打印使用方法
+    RCLCPP_INFO(
+      this->get_logger(),
+      "使用方法: ros2 run <package_name> <node_name> <topic_num> <runtime> <frequency>");
+    RCLCPP_INFO(this->get_logger(), "示例: ros2 run cpp_pubsub main_node 2 20 10");
+    RCLCPP_INFO(
+      this->get_logger(), "启动MainNode with topicNum: %d， runtime: %ds， frequency: %dHZ", topicNum, runtime,
+      frequency);
+
+    for (int i = 1; i <= topicNum; ++i) {
       auto publisher = this->create_publisher<std_msgs::msg::String>(
         "hello_" + std::to_string(i) + "_main", 10);
       publishers_.push_back(publisher);
@@ -55,8 +64,6 @@ public:
     message.data = message_stream.str();
     publishers_[topic_number - 1]->publish(message);
 
-    // 增加发送计数
-    message_counts_[topic_number - 1]++;
   }
 
   void message_callback(const std_msgs::msg::String::SharedPtr msg, int topic_number)
@@ -73,7 +80,7 @@ public:
 
       // 记录收到的消息及其延迟
       {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // std::lock_guard<std::mutex> lock(mutex_);
         received_delays_[topic_number - 1].push_back(delay);
       }
     }
@@ -83,55 +90,67 @@ public:
   {
     // 打印第一个 topic 的序列号和收到的消息总数
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!message_counts_.empty()) {
-        RCLCPP_INFO(
-          this->get_logger(),
-          "Summary for topic1: Current Sequence: %ld, Total Received: %d",
-          sequences_[0], message_counts_[0]);
-      }
+      // std::lock_guard<std::mutex> lock(mutex_);
+      RCLCPP_INFO(
+        this->get_logger(),
+        "Summary for topic1: Current Sequence: %ld, Total Received: %ld",
+        sequences_[0], received_delays_[0].size());
     }
   }
 
   void stop_publishing()
   {
     for (auto & timer : timers_) {
-      timer->cancel();        // 停止发布定时器
+      timer->cancel();              // 停止发布定时器
     }
     summary_timer_->cancel();   // 停止汇总信息定时器
+    end_timer_->cancel();       // 停止运行结束定时器
 
-    // 检查发送和接收消息数量
-    for (size_t i = 0; i < message_counts_.size(); ++i) {
-      RCLCPP_WARN(
-        this->get_logger(), "Mismatch in topic %ld: Sent: %ld, Received: %d",
-        i + 1, sequences_[i], message_counts_[i]);
-      // 延迟10秒后开始打印记录的信息
-      this->create_wall_timer(
-        std::chrono::seconds(10), [this, i]() {print_received_delays(i);});
-    }
+    // 输出当前序列号数量
+    std::cout << "sequence: " << sequences_.size() << std::endl;
 
-    rclcpp::shutdown();
+    delayed_print_timer_ = this->create_wall_timer(
+      std::chrono::seconds(10), [this]() {
+        print_received_delays();
+      }
+    );
   }
 
-  void print_received_delays(int topic_number)
+  void print_received_delays()
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!received_delays_[topic_number - 1].empty()) {
-      auto min_delay = *std::min_element(
-        received_delays_[topic_number - 1].begin(),
-        received_delays_[topic_number - 1].end());
-      auto max_delay = *std::max_element(
-        received_delays_[topic_number - 1].begin(),
-        received_delays_[topic_number - 1].end());
-      auto average_delay = std::accumulate(
-        received_delays_[topic_number - 1].begin(),
-        received_delays_[topic_number - 1].end(), 0.0) /
-        received_delays_[topic_number - 1].size();
+    rclcpp::shutdown();
 
-      RCLCPP_INFO(
-        this->get_logger(),
-        "Topic %d Delays - Min: %ld µs, Max: %ld µs, Average: %.2f µs",
-        topic_number, min_delay, max_delay, average_delay);
+    for (size_t topic_number = 0; topic_number < sequences_.size(); topic_number++) {
+      if (!received_delays_[topic_number].empty()) {
+        auto min_delay = *std::min_element(
+          received_delays_[topic_number].begin(),
+          received_delays_[topic_number].end());
+        auto max_delay = *std::max_element(
+          received_delays_[topic_number].begin(),
+          received_delays_[topic_number].end());
+        auto average_delay = std::accumulate(
+          received_delays_[topic_number].begin(),
+          received_delays_[topic_number].end(), 0.0) /
+          received_delays_[topic_number].size();
+
+        // 计算90%的延迟
+        std::vector<int64_t> sorted_delays = received_delays_[topic_number];
+        std::sort(sorted_delays.begin(), sorted_delays.end());
+        size_t index_90th = static_cast<size_t>(sorted_delays.size() * 0.9);
+        int64_t delay_90th = sorted_delays[index_90th];
+
+        // 获取发送和接收数量
+        int64_t sent_count = sequences_[topic_number];
+        int64_t received_count = received_delays_[topic_number].size();
+
+        RCLCPP_INFO(
+          this->get_logger(),
+          "Topic %ld Delays - Min: %ld µs, Max: %ld µs, Average: %ld µs, 90th Percentile: %ld µs, Sent: %ld, Received: %ld",
+          topic_number + 1, min_delay, max_delay, static_cast<long>(average_delay), delay_90th, sent_count,
+          received_count);
+      } else {
+        RCLCPP_INFO(this->get_logger(), "Topic %ld has no received delays.", topic_number + 1);
+      }
     }
   }
 
@@ -141,12 +160,10 @@ private:
   std::vector<rclcpp::TimerBase::SharedPtr> timers_;
   rclcpp::TimerBase::SharedPtr summary_timer_;
   rclcpp::TimerBase::SharedPtr end_timer_;
+  rclcpp::TimerBase::SharedPtr delayed_print_timer_;
 
   std::vector<int64_t> sequences_;     // 每个主题的独立序列号
-  std::vector<int> message_counts_;     // 每个主题的消息计数
   std::vector<std::vector<int64_t>> received_delays_;    // 存储每个主题的延迟记录
-
-  std::mutex mutex_;                   // 保护共享数据的互斥锁
 };
 
 int main(int argc, char ** argv)
