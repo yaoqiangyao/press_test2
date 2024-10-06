@@ -18,7 +18,7 @@ public:
     // 打印使用方法
     RCLCPP_INFO(
       this->get_logger(),
-      "使用方法: ros2 run <package_name> <node_name> <topic_num> <runtime> <frequency>");
+      "使用方法: ros2 run cpp_pubsub main_node/relay_node <topic_num> <runtime> <frequency>");
     RCLCPP_INFO(this->get_logger(), "示例: ros2 run cpp_pubsub main_node 2 20 10");
     RCLCPP_INFO(
       this->get_logger(), "启动MainNode with topicNum: %d， runtime: %ds， frequency: %dHZ", topicNum, runtime,
