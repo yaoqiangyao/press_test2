@@ -5,10 +5,11 @@
 		"args": {
 			"WORKSPACE": "${containerWorkspaceFolder}"
 		}
-	},   
+	},
 	"remoteUser": "yaoqiang",
 	"runArgs": [
 		"--network=host",
+		"--name=press_test2",
 		"--cap-add=SYS_PTRACE",
 		"--security-opt=seccomp:unconfined",
 		"--security-opt=apparmor:unconfined",
